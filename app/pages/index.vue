@@ -28,6 +28,95 @@ const c4 = ref<string>(DEFAULTS.colors[3])
 const autoMode = ref<boolean>(false)
 const showControls = ref<boolean>(true)
 
+type PresetSettings = {
+  style: StyleKey
+  speed: number
+  scale: number
+  warp: number
+  sharpness: number
+  brightness: number
+  colors: [string, string, string, string]
+  autoMode: boolean
+}
+type Preset = {
+  id: string
+  name: string
+  settings: PresetSettings
+  date_created: string
+}
+
+const presets = ref<Preset[]>([])
+const newPresetName = ref<string>('')
+const presetSaving = ref<boolean>(false)
+const presetError = ref<string | null>(null)
+
+async function fetchPresets() {
+  presetError.value = null
+  try {
+    presets.value = await $fetch<Preset[]>('/api/presets')
+  } catch (e: any) {
+    presetError.value = e?.statusMessage || e?.message || 'Presets konnten nicht geladen werden'
+  }
+}
+
+async function savePreset() {
+  const name = newPresetName.value.trim()
+  if (!name) return
+  presetSaving.value = true
+  presetError.value = null
+  try {
+    const settings: PresetSettings = {
+      style: style.value,
+      speed: speed.value,
+      scale: scale.value,
+      warp: warp.value,
+      sharpness: sharpness.value,
+      brightness: brightness.value,
+      colors: [c1.value, c2.value, c3.value, c4.value],
+      autoMode: autoMode.value,
+    }
+    const created = await $fetch<Preset>('/api/presets', {
+      method: 'POST',
+      body: { name, settings },
+    })
+    presets.value = [created, ...presets.value]
+    newPresetName.value = ''
+  } catch (e: any) {
+    presetError.value = e?.statusMessage || e?.message || 'Preset konnte nicht gespeichert werden'
+  } finally {
+    presetSaving.value = false
+  }
+}
+
+function loadPreset(p: Preset) {
+  const s = p.settings
+  // Disable autoMode first so colour writes don't trigger harmony derivation,
+  // then restore all values, then set autoMode last to its target state.
+  autoMode.value = false
+  style.value = s.style
+  speed.value = s.speed
+  scale.value = s.scale
+  warp.value = s.warp
+  sharpness.value = s.sharpness
+  brightness.value = s.brightness
+  c1.value = s.colors[0]
+  c2.value = s.colors[1]
+  c3.value = s.colors[2]
+  c4.value = s.colors[3]
+  autoMode.value = s.autoMode
+}
+
+async function deletePreset(p: Preset) {
+  if (!confirm(`Preset „${p.name}" löschen?`)) return
+  presetError.value = null
+  try {
+    await $fetch(`/api/presets/${p.id}`, { method: 'DELETE' })
+    presets.value = presets.value.filter(x => x.id !== p.id)
+  } catch (e: any) {
+    presetError.value = e?.statusMessage || e?.message || 'Preset konnte nicht gelöscht werden'
+  }
+}
+
 function deriveHarmony(baseHex: string): [string, string, string] {
   const base = new THREE.Color().setStyle(baseHex)
   const hsl = { h: 0, s: 0, l: 0 }
@@ -238,6 +327,8 @@ onMounted(() => {
     uniforms.u_resolution.value.set(el.clientWidth, el.clientHeight)
   })
   resizeObserver.observe(el)
+
+  fetchPresets()
 })
 
 watch(speed,     v => { if (uniforms) uniforms.u_speed.value     = v })
@@ -420,6 +511,51 @@ function reset() {
               :class="autoMode ? 'border-2 border-white/70 ring-2 ring-white/20' : 'border border-white/20'"
             />
           </div>
+        </div>
+
+        <div class="border-t border-white/10 pt-4 space-y-2">
+          <label class="block text-xs uppercase tracking-wider text-white/60">Presets</label>
+          <div class="flex gap-2">
+            <input
+              v-model="newPresetName"
+              type="text"
+              placeholder="Name eingeben…"
+              class="flex-1 min-w-0 bg-black/50 border border-white/20 rounded px-2 py-1.5 outline-none focus:border-white/50 text-sm"
+              @keydown.enter="savePreset"
+            />
+            <button
+              @click="savePreset"
+              :disabled="presetSaving || !newPresetName.trim()"
+              class="px-3 py-1.5 text-xs uppercase tracking-wider border border-white/20 rounded hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Speichern
+            </button>
+          </div>
+
+          <p v-if="presetError" class="text-xs text-red-400">{{ presetError }}</p>
+
+          <ul v-if="presets.length" class="space-y-1 max-h-48 overflow-y-auto">
+            <li
+              v-for="p in presets"
+              :key="p.id"
+              class="flex items-center gap-2 group"
+            >
+              <button
+                @click="loadPreset(p)"
+                class="flex-1 min-w-0 text-left px-2 py-1 rounded hover:bg-white/10 text-sm truncate"
+                :title="p.name"
+              >
+                {{ p.name }}
+              </button>
+              <button
+                @click="deletePreset(p)"
+                class="text-white/40 hover:text-red-400 px-1.5 py-1 text-base leading-none"
+                :aria-label="`Preset ${p.name} löschen`"
+                title="Löschen"
+              >×</button>
+            </li>
+          </ul>
+          <p v-else-if="!presetError" class="text-xs text-white/40 italic">Noch keine Presets gespeichert.</p>
         </div>
 
         <button
