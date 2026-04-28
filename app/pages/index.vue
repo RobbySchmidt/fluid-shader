@@ -21,6 +21,9 @@ const DEFAULTS = {
   posX: 0,
   posY: 0,
   posZ: 0,
+  rotX: 0,
+  rotY: 0,
+  rotZ: 0,
   distortion: 0.4,
   wobble: 0.5,
 }
@@ -42,6 +45,9 @@ const size = ref<number>(DEFAULTS.size)
 const posX = ref<number>(DEFAULTS.posX)
 const posY = ref<number>(DEFAULTS.posY)
 const posZ = ref<number>(DEFAULTS.posZ)
+const rotX = ref<number>(DEFAULTS.rotX)
+const rotY = ref<number>(DEFAULTS.rotY)
+const rotZ = ref<number>(DEFAULTS.rotZ)
 const distortion = ref<number>(DEFAULTS.distortion)
 const wobble = ref<number>(DEFAULTS.wobble)
 
@@ -59,6 +65,7 @@ type PresetSettings = {
   shape?: ShapeKey
   size?: number
   position?: [number, number, number]
+  rotation?: [number, number, number]
   distortion?: number
   wobble?: number
 }
@@ -101,6 +108,7 @@ async function savePreset() {
       shape: shape.value,
       size: size.value,
       position: [posX.value, posY.value, posZ.value],
+      rotation: [rotX.value, rotY.value, rotZ.value],
       distortion: distortion.value,
       wobble: wobble.value,
     }
@@ -137,9 +145,55 @@ function loadPreset(p: Preset) {
   posX.value = s.position?.[0] ?? DEFAULTS.posX
   posY.value = s.position?.[1] ?? DEFAULTS.posY
   posZ.value = s.position?.[2] ?? DEFAULTS.posZ
+  rotX.value = s.rotation?.[0] ?? DEFAULTS.rotX
+  rotY.value = s.rotation?.[1] ?? DEFAULTS.rotY
+  rotZ.value = s.rotation?.[2] ?? DEFAULTS.rotZ
   distortion.value = s.distortion ?? DEFAULTS.distortion
   wobble.value = s.wobble ?? DEFAULTS.wobble
   autoMode.value = s.autoMode
+}
+
+// ───── Pointer-drag rotation ─────
+// Horizontal drag → rotate around Y (yaw); vertical drag → rotate around X
+// (pitch). Z is slider-only. Values wrap into -180..180 so the slider stays
+// in sync with the underlying state during long drags. Drag is opt-in via a
+// panel checkbox so scrolling/text-selection on the page isn't intercepted.
+const dragRotate = ref(false)
+const dragging = ref(false)
+let dragStartX = 0
+let dragStartY = 0
+let dragStartRotX = 0
+let dragStartRotY = 0
+
+function wrap180(v: number): number {
+  return ((v + 180) % 360 + 360) % 360 - 180
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (style.value !== 'shapes' || !dragRotate.value) return
+  // Only react to left-button / primary pointer; ignore right-clicks etc.
+  if (e.button !== 0 && e.pointerType === 'mouse') return
+  dragging.value = true
+  dragStartX = e.clientX
+  dragStartY = e.clientY
+  dragStartRotX = rotX.value
+  dragStartRotY = rotY.value
+  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!dragging.value) return
+  const dx = e.clientX - dragStartX
+  const dy = e.clientY - dragStartY
+  const sensitivity = 0.5 // degrees per pixel
+  rotY.value = wrap180(dragStartRotY + dx * sensitivity)
+  rotX.value = wrap180(dragStartRotX + dy * sensitivity)
+}
+
+function onPointerUp(e: PointerEvent) {
+  if (!dragging.value) return
+  dragging.value = false
+  ;(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId)
 }
 
 async function deletePreset(p: Preset) {
@@ -194,6 +248,7 @@ type Uniforms = {
   u_shape: { value: number }
   u_size: { value: number }
   u_position: { value: THREE.Vector3 }
+  u_rotation: { value: THREE.Vector3 }
   u_distortion: { value: number }
   u_wobble: { value: number }
 }
@@ -225,6 +280,7 @@ uniform vec3  u_c4;
 uniform int   u_shape;
 uniform float u_size;
 uniform vec3  u_position;
+uniform vec3  u_rotation;
 uniform float u_distortion;
 uniform float u_wobble;
 
@@ -294,10 +350,36 @@ vec3 twist(vec3 p, float k) {
   return vec3(xz.x, p.y, xz.y);
 }
 
+vec3 rotateX(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+}
+
+vec3 rotateY(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+}
+
+vec3 rotateZ(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+}
+
 float sceneSDF(vec3 p) {
+  // Apply user rotation (degrees in uniform → radians for trig).
+  // Order: X then Y then Z — gives intuitive "tumble in 3D" behaviour for
+  // mouse drag (X = pitch / vertical drag, Y = yaw / horizontal drag,
+  // Z = roll / slider only).
+  vec3 q = rotateZ(
+    rotateY(
+      rotateX(p, radians(u_rotation.x)),
+      radians(u_rotation.y)
+    ),
+    radians(u_rotation.z)
+  );
   // Twist the input space — gives a rotational "verzerrung" effect on all
   // shapes except cluster (which already animates its layout).
-  vec3 q = (u_shape == 4) ? p : twist(p, u_distortion * 1.2);
+  if (u_shape != 4) q = twist(q, u_distortion * 1.2);
 
   float d;
   if (u_shape == 0) {
@@ -325,9 +407,10 @@ float sceneSDF(vec3 p) {
     d = smin(smin(s1, s2, 0.4), s3, 0.4);
   }
 
-  // Surface wobble — low-freq sin displacement, scaled by amplitude.
+  // Surface wobble — low-freq sin displacement (in rotated object space, so
+  // the pattern follows the rotation instead of stuck to the world).
   float ta = u_time * u_speed * 8.0;
-  d += sin(p.x * 3.5 + ta) * sin(p.y * 3.5 + ta * 0.8) * sin(p.z * 3.5 + ta * 1.3)
+  d += sin(q.x * 3.5 + ta) * sin(q.y * 3.5 + ta * 0.8) * sin(q.z * 3.5 + ta * 1.3)
        * u_wobble * 0.08;
   return d;
 }
@@ -466,6 +549,7 @@ onMounted(() => {
     u_shape: { value: SHAPE_MAP[shape.value] },
     u_size: { value: size.value },
     u_position: { value: new THREE.Vector3(posX.value, posY.value, posZ.value) },
+    u_rotation: { value: new THREE.Vector3(rotX.value, rotY.value, rotZ.value) },
     u_distortion: { value: distortion.value },
     u_wobble: { value: wobble.value },
   }
@@ -515,6 +599,9 @@ watch(size,       v => { if (uniforms) uniforms.u_size.value       = v })
 watch(posX,       v => { if (uniforms) uniforms.u_position.value.x = v })
 watch(posY,       v => { if (uniforms) uniforms.u_position.value.y = v })
 watch(posZ,       v => { if (uniforms) uniforms.u_position.value.z = v })
+watch(rotX,       v => { if (uniforms) uniforms.u_rotation.value.x = v })
+watch(rotY,       v => { if (uniforms) uniforms.u_rotation.value.y = v })
+watch(rotZ,       v => { if (uniforms) uniforms.u_rotation.value.z = v })
 watch(distortion, v => { if (uniforms) uniforms.u_distortion.value = v })
 watch(wobble,     v => { if (uniforms) uniforms.u_wobble.value     = v })
 
@@ -551,6 +638,9 @@ function reset() {
   posX.value = DEFAULTS.posX
   posY.value = DEFAULTS.posY
   posZ.value = DEFAULTS.posZ
+  rotX.value = DEFAULTS.rotX
+  rotY.value = DEFAULTS.rotY
+  rotZ.value = DEFAULTS.rotZ
   distortion.value = DEFAULTS.distortion
   wobble.value = DEFAULTS.wobble
 }
@@ -559,7 +649,15 @@ function reset() {
 <template>
   <div class="relative min-h-screen overflow-hidden bg-[#050811] text-white">
     <!-- Custom Three.js fluid shader background -->
-    <div ref="containerRef" class="absolute inset-0 z-0" />
+    <div
+      ref="containerRef"
+      class="absolute inset-0 z-0"
+      :class="style === 'shapes' && dragRotate ? [dragging ? 'cursor-grabbing' : 'cursor-grab', 'select-none', 'touch-none'] : ''"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+    />
 
     <!-- Header -->
     <header class="relative z-10 flex items-center justify-between px-8 pt-8 pb-6">
@@ -663,6 +761,32 @@ function reset() {
               <input v-model.number="posZ" type="range" min="-3" max="3" step="0.1" class="w-full" />
             </div>
           </div>
+
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <div class="flex justify-between text-[10px] uppercase tracking-wider text-white/60 mb-1.5">
+                <span>Rot X</span><span>{{ rotX.toFixed(0) }}°</span>
+              </div>
+              <input v-model.number="rotX" type="range" min="-180" max="180" step="1" class="w-full" />
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] uppercase tracking-wider text-white/60 mb-1.5">
+                <span>Rot Y</span><span>{{ rotY.toFixed(0) }}°</span>
+              </div>
+              <input v-model.number="rotY" type="range" min="-180" max="180" step="1" class="w-full" />
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] uppercase tracking-wider text-white/60 mb-1.5">
+                <span>Rot Z</span><span>{{ rotZ.toFixed(0) }}°</span>
+              </div>
+              <input v-model.number="rotZ" type="range" min="-180" max="180" step="1" class="w-full" />
+            </div>
+          </div>
+
+          <label class="flex items-center gap-2 text-xs cursor-pointer select-none -mt-1">
+            <input v-model="dragRotate" type="checkbox" class="cursor-pointer accent-white" />
+            <span>Mit Maus drehen (Hintergrund ziehen)</span>
+          </label>
 
           <div>
             <div class="flex justify-between text-xs uppercase tracking-wider text-white/60 mb-1.5">
