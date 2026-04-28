@@ -18,4 +18,11 @@ export default defineNuxtConfig({
     prefix: '',
     componentDir: '@/components/ui',
   },
+
+  runtimeConfig: {
+    directusToken: '',
+    public: {
+      directusUrl: '',
+    },
+  },
 })
