@@ -6,13 +6,13 @@ type StyleKey = 'flow' | 'pulse' | 'waves'
 const STYLE_MAP: Record<StyleKey, number> = { flow: 0, pulse: 1, waves: 2 }
 
 const DEFAULTS = {
-  style: 'flow' as StyleKey,
-  speed: 0.025,
-  scale: 1.8,
-  warp: 1.2,
-  sharpness: 0.55,
-  brightness: 1.0,
-  colors: ['#050811', '#0c2440', '#1d4a5e', '#3b8a98'] as const,
+  style: 'waves' as StyleKey,
+  speed: 0.045,
+  scale: 1.25,
+  warp: 1.8,
+  sharpness: 0,
+  brightness: 0.2,
+  colors: ['#0d0019', '#1c023b', '#a791d9', '#c1b4fd'] as const,
 }
 
 const style = ref<StyleKey>(DEFAULTS.style)
@@ -107,7 +107,6 @@ function loadPreset(p: Preset) {
 }
 
 async function deletePreset(p: Preset) {
-  if (!confirm(`Preset „${p.name}" löschen?`)) return
   presetError.value = null
   try {
     await $fetch(`/api/presets/${p.id}`, { method: 'DELETE' })
